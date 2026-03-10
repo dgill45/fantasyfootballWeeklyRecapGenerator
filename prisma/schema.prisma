@@ -1,0 +1,74 @@
+// Fantasy League Weekly Recap Generator
+// SQLite database via Prisma ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// A fantasy football league with a name and season year
+model League {
+  id         Int      @id @default(autoincrement())
+  name       String
+  seasonYear Int
+  createdAt  DateTime @default(now())
+
+  teams Team[]
+  weeks Week[]
+}
+
+// A team belonging to a league
+model Team {
+  id       Int    @id @default(autoincrement())
+  name     String
+  leagueId Int
+
+  league    League    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  // A team can appear on either side of a matchup
+  matchupsAsA Matchup[] @relation("TeamA")
+  matchupsAsB Matchup[] @relation("TeamB")
+}
+
+// One week in a season
+model Week {
+  id         Int      @id @default(autoincrement())
+  weekNumber Int
+  leagueId   Int
+  createdAt  DateTime @default(now())
+
+  league   League    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  matchups Matchup[]
+  recap    Recap?
+}
+
+// A head-to-head matchup between two teams in a given week
+model Matchup {
+  id      Int   @id @default(autoincrement())
+  weekId  Int
+  teamAId Int
+  teamBId Int
+  scoreA  Float
+  scoreB  Float
+
+  week  Week @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  teamA Team @relation("TeamA", fields: [teamAId], references: [id])
+  teamB Team @relation("TeamB", fields: [teamBId], references: [id])
+}
+
+// The generated recap content for a given week
+// All text fields are stored as JSON strings for flexibility
+model Recap {
+  id            Int    @id @default(autoincrement())
+  weekId        Int    @unique
+  headlines     String // JSON array of headline strings
+  storyline     String // narrative paragraph
+  awards        String // JSON object of award name -> description
+  roast         String // JSON array of roast strings
+  powerRankings String // JSON array of { teamName, rank, record, totalPoints }
+
+  week Week @relation(fields: [weekId], references: [id], onDelete: Cascade)
+}

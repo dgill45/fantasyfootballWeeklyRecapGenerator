@@ -1,0 +1,21 @@
+# Next.js
+.next/
+out/
+
+# Node
+node_modules/
+
+# SQLite database
+*.db
+*.db-journal
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+
+# Prisma
+prisma/migrations/
