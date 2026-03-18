@@ -43,6 +43,9 @@ export async function createWeekWithMatchups(
     const scoreB = parseFloat(formData.get(`matchup_${i}_scoreB`) as string);
 
     if (teamAId && teamBId && !isNaN(scoreA) && !isNaN(scoreB)) {
+      if (scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
+        return { error: `Matchup ${i + 1} has an invalid score. Scores must be between 0 and 500.` };
+      }
       matchupInputs.push({ teamAId, teamBId, scoreA, scoreB });
     }
     i++;
@@ -140,4 +143,104 @@ export async function createWeekWithMatchups(
   });
 
   redirect(`/league/${leagueId}/week/${week.id}`);
+}
+
+/**
+ * Deletes a week (and its matchups + recap via cascade).
+ */
+export async function deleteWeek(leagueId: number, weekId: number) {
+  await prisma.week.delete({ where: { id: weekId } });
+  redirect(`/league/${leagueId}`);
+}
+
+/**
+ * Updates matchup scores for an existing week and regenerates the recap.
+ */
+export async function updateWeekMatchups(
+  leagueId: number,
+  weekId: number,
+  _prevState: { error: string } | null,
+  formData: FormData
+): Promise<{ error: string } | null> {
+  const updates: Array<{ id: number; scoreA: number; scoreB: number }> = [];
+
+  let i = 0;
+  while (formData.get(`matchup_${i}_id`) !== null) {
+    const id = parseInt(formData.get(`matchup_${i}_id`) as string, 10);
+    const scoreA = parseFloat(formData.get(`matchup_${i}_scoreA`) as string);
+    const scoreB = parseFloat(formData.get(`matchup_${i}_scoreB`) as string);
+
+    if (isNaN(scoreA) || isNaN(scoreB) || scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
+      return { error: `Matchup ${i + 1} has an invalid score. Scores must be between 0 and 500.` };
+    }
+    updates.push({ id, scoreA, scoreB });
+    i++;
+  }
+
+  if (updates.length === 0) {
+    return { error: "No matchups found to update." };
+  }
+
+  // Update all matchup scores
+  await Promise.all(
+    updates.map((u) =>
+      prisma.matchup.update({
+        where: { id: u.id },
+        data: { scoreA: u.scoreA, scoreB: u.scoreB },
+      })
+    )
+  );
+
+  // Delete old recap so we regenerate fresh
+  await prisma.recap.deleteMany({ where: { weekId } });
+
+  // Fetch updated week data for recap generation
+  const week = await prisma.week.findUnique({
+    where: { id: weekId },
+    include: { matchups: { include: { teamA: true, teamB: true } } },
+  });
+
+  if (!week) return { error: "Week not found." };
+
+  const matchupData: MatchupData[] = week.matchups.map((m) => ({
+    teamA: m.teamA.name,
+    teamB: m.teamB.name,
+    scoreA: m.scoreA,
+    scoreB: m.scoreB,
+  }));
+
+  // Build prior records from all other weeks in this league
+  const previousMatchups = await prisma.matchup.findMany({
+    where: { week: { leagueId, id: { not: weekId } } },
+    include: { teamA: true, teamB: true },
+  });
+
+  const recordMap = new Map<string, TeamRecord>();
+  for (const m of previousMatchups) {
+    const aKey = m.teamA.name;
+    const bKey = m.teamB.name;
+    if (!recordMap.has(aKey)) recordMap.set(aKey, { teamName: aKey, wins: 0, losses: 0, totalPoints: 0 });
+    if (!recordMap.has(bKey)) recordMap.set(bKey, { teamName: bKey, wins: 0, losses: 0, totalPoints: 0 });
+    const aRec = recordMap.get(aKey)!;
+    const bRec = recordMap.get(bKey)!;
+    aRec.totalPoints += m.scoreA;
+    bRec.totalPoints += m.scoreB;
+    if (m.scoreA > m.scoreB) { aRec.wins++; bRec.losses++; }
+    else { bRec.wins++; aRec.losses++; }
+  }
+
+  const recap = generateRecap(week.weekNumber, matchupData, Array.from(recordMap.values()));
+
+  await prisma.recap.create({
+    data: {
+      weekId,
+      headlines: JSON.stringify(recap.headlines),
+      storyline: recap.storyline,
+      awards: JSON.stringify(recap.awards),
+      roast: JSON.stringify(recap.roast),
+      powerRankings: JSON.stringify(recap.powerRankings),
+    },
+  });
+
+  redirect(`/league/${leagueId}/week/${weekId}`);
 }

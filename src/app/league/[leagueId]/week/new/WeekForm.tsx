@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useActionState, useState } from "react";
 
 type Team = { id: number; name: string };
 
@@ -11,15 +11,21 @@ type Matchup = {
   scoreB: string;
 };
 
+type FormState = { error: string } | null;
+
 // Interactive form for entering weekly matchup results.
 // The commissioner picks which teams faced each other and enters scores.
 export default function WeekForm({
   teams,
   action,
+  nextWeekNumber,
 }: {
   teams: Team[];
-  action: (formData: FormData) => Promise<void>;
+  action: (prevState: FormState, formData: FormData) => Promise<FormState>;
+  nextWeekNumber: number;
 }) {
+  const [state, formAction, pending] = useActionState(action, null);
+
   // Start with one empty matchup slot
   const [matchups, setMatchups] = useState<Matchup[]>([
     { teamAId: "", teamBId: "", scoreA: "", scoreB: "" },
@@ -43,7 +49,13 @@ export default function WeekForm({
   }
 
   return (
-    <form action={action} className="space-y-6">
+    <form action={formAction} className="space-y-6">
+      {state?.error && (
+        <div className="bg-red-50 border border-red-300 text-red-700 text-sm rounded-lg px-4 py-3">
+          {state.error}
+        </div>
+      )}
+
       {/* Week number */}
       <div className="bg-white border border-gray-200 rounded-xl p-5">
         <label
@@ -59,7 +71,7 @@ export default function WeekForm({
           required
           min={1}
           max={25}
-          defaultValue={1}
+          defaultValue={nextWeekNumber}
           className="w-32 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
         />
       </div>
@@ -113,6 +125,8 @@ export default function WeekForm({
                   name={`matchup_${i}_scoreA`}
                   type="number"
                   step="0.01"
+                  min={0}
+                  max={500}
                   required
                   placeholder="0.00"
                   value={matchup.scoreA}
@@ -150,6 +164,8 @@ export default function WeekForm({
                   name={`matchup_${i}_scoreB`}
                   type="number"
                   step="0.01"
+                  min={0}
+                  max={500}
                   required
                   placeholder="0.00"
                   value={matchup.scoreB}
@@ -172,9 +188,10 @@ export default function WeekForm({
 
       <button
         type="submit"
-        className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-lg transition-colors text-base"
+        disabled={pending}
+        className="w-full bg-green-600 hover:bg-green-700 disabled:opacity-60 text-white font-semibold py-3 rounded-lg transition-colors text-base"
       >
-        Submit Week & Generate Recap →
+        {pending ? "Generating recap…" : "Submit Week & Generate Recap →"}
       </button>
     </form>
   );

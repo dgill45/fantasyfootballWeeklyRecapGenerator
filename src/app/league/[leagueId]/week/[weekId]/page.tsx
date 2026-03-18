@@ -205,9 +205,15 @@ export default async function RecapPage({
       </section>
 
       {/* Footer nav */}
-      <div className="pt-4 text-center text-sm text-gray-400">
+      <div className="pt-4 flex items-center justify-between text-sm text-gray-400">
         <Link href={`/league/${leagueId}`} className="underline hover:text-green-600">
-          Back to {week.league.name}
+          ← Back to {week.league.name}
+        </Link>
+        <Link
+          href={`/league/${leagueId}/week/${weekId}/edit`}
+          className="border border-gray-200 rounded-lg px-3 py-1.5 text-gray-500 hover:text-gray-700 hover:border-gray-300 transition-colors"
+        >
+          Edit Scores
         </Link>
       </div>
     </div>

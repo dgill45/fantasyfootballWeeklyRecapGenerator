@@ -14,13 +14,21 @@ export default async function NewWeekPage({
 
   const league = await prisma.league.findUnique({
     where: { id },
-    include: { teams: { orderBy: { name: "asc" } } },
+    include: {
+      teams: { orderBy: { name: "asc" } },
+      weeks: { select: { weekNumber: true } },
+    },
   });
 
   if (!league) notFound();
 
   // Bind the leagueId so the form action knows which league it belongs to
   const action = createWeekWithMatchups.bind(null, id);
+
+  const nextWeekNumber =
+    league.weeks.length === 0
+      ? 1
+      : Math.max(...league.weeks.map((w) => w.weekNumber)) + 1;
 
   return (
     <div className="space-y-6">
@@ -36,7 +44,18 @@ export default async function NewWeekPage({
         </p>
       </div>
 
-      <WeekForm teams={league.teams} action={action} />
+      {league.weeks.length > 0 && (
+        <p className="text-sm text-gray-500">
+          Already entered:{" "}
+          {league.weeks
+            .map((w) => w.weekNumber)
+            .sort((a, b) => a - b)
+            .map((n) => `Week ${n}`)
+            .join(", ")}
+        </p>
+      )}
+
+      <WeekForm teams={league.teams} action={action} nextWeekNumber={nextWeekNumber} />
     </div>
   );
 }
