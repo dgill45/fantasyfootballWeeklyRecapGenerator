@@ -31,6 +31,8 @@ model Team {
   // A team can appear on either side of a matchup
   matchupsAsA Matchup[] @relation("TeamA")
   matchupsAsB Matchup[] @relation("TeamB")
+
+  @@unique([leagueId, name])
 }
 
 // One week in a season
