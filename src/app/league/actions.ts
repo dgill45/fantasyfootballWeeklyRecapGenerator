@@ -33,3 +33,35 @@ export async function createLeague(
 
   redirect(`/league/${league.id}`);
 }
+
+// Updates an existing league's name/year and adds any new teams.
+// Existing teams are not modified — they're tied to matchup history.
+export async function updateLeague(
+  leagueId: number,
+  _prevState: { error: string } | null,
+  formData: FormData
+): Promise<{ error: string } | null> {
+  const name = (formData.get("name") as string)?.trim();
+  const seasonYear = parseInt(formData.get("seasonYear") as string, 10);
+
+  if (!name || !seasonYear) {
+    return { error: "League name and season year are required." };
+  }
+
+  const newTeamNames: string[] = Array.from(formData.entries())
+    .filter(([key, value]) => key.startsWith("newTeam_") && typeof value === "string" && (value as string).trim())
+    .map(([, value]) => (value as string).trim());
+
+  await prisma.league.update({
+    where: { id: leagueId },
+    data: {
+      name,
+      seasonYear,
+      ...(newTeamNames.length > 0 && {
+        teams: { create: newTeamNames.map((n) => ({ name: n })) },
+      }),
+    },
+  });
+
+  redirect(`/league/${leagueId}`);
+}

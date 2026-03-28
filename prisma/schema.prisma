@@ -64,11 +64,12 @@ model Matchup {
 model Recap {
   id            Int    @id @default(autoincrement())
   weekId        Int    @unique
-  headlines     String // JSON array of headline strings
-  storyline     String // narrative paragraph
-  awards        String // JSON object of award name -> description
-  roast         String // JSON array of roast strings
-  powerRankings String // JSON array of { teamName, rank, record, totalPoints }
+  title         String @default("")   // punchy week title
+  headlines     String                // JSON array of headline strings
+  storyline     String                // JSON array of per-matchup recap paragraphs
+  awards        String                // JSON object of callouts { biggestWin, worstLoss, teamInTrouble, teamToWatch }
+  roast         String                // unused, kept as "[]" for backwards compat
+  powerRankings String                // JSON array of PowerRankingEntry
 
   week Week @relation(fields: [weekId], references: [id], onDelete: Cascade)
 }

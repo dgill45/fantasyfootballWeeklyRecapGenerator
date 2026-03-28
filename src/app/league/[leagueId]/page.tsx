@@ -41,6 +41,12 @@ export default async function LeaguePage({
             Standings
           </Link>
           <Link
+            href={`/league/${league.id}/edit`}
+            className="border border-gray-300 hover:border-gray-400 text-gray-700 font-semibold px-4 py-2 rounded-lg text-sm transition-colors"
+          >
+            Edit League
+          </Link>
+          <Link
             href={`/league/${league.id}/week/new`}
             className="bg-green-600 hover:bg-green-700 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-colors"
           >

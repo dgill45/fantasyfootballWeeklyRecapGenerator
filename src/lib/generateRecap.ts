@@ -1,11 +1,12 @@
 /**
- * Recap generation logic — purely deterministic, no AI APIs.
+ * Recap generation — powered by Claude API.
  *
- * Given matchup data for a week, this file produces headlines, a storyline,
- * awards, roast lines, and power rankings.
- *
- * The tone is playful and sports-media-inspired. Think ESPN segment, not spreadsheet.
+ * The AI generates the narrative content (title, headlines, matchup recaps,
+ * weekly callouts). Power rankings are still computed deterministically from
+ * the actual win/loss records so they're always accurate.
  */
+
+import Anthropic from "@anthropic-ai/sdk";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -25,10 +26,15 @@ export type PowerRankingEntry = {
 };
 
 export type RecapContent = {
+  title: string;
   headlines: string[];
-  storyline: string;
-  awards: Record<string, string>;
-  roast: string[];
+  matchupRecaps: string[]; // one paragraph per matchup, in input order
+  callouts: {
+    biggestWin: string;
+    worstLoss: string;
+    teamInTrouble: string;
+    teamToWatch: string;
+  };
   powerRankings: PowerRankingEntry[];
 };
 
@@ -42,152 +48,59 @@ export type TeamRecord = {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function winner(m: MatchupData): { name: string; score: number } {
-  return m.scoreA >= m.scoreB
-    ? { name: m.teamA, score: m.scoreA }
-    : { name: m.teamB, score: m.scoreB };
+function extractJSON(text: string): string {
+  // Strip markdown code fences if Claude wraps output in them
+  const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  return match ? match[1].trim() : text.trim();
 }
 
-function loser(m: MatchupData): { name: string; score: number } {
-  return m.scoreA < m.scoreB
-    ? { name: m.teamA, score: m.scoreA }
-    : { name: m.teamB, score: m.scoreB };
-}
+function buildStorylines(records: TeamRecord[]): string {
+  if (records.length === 0) return "First week of the season — no prior storylines.";
 
-function scoreDiff(m: MatchupData): number {
-  return Math.abs(m.scoreA - m.scoreB);
-}
+  const sorted = [...records].sort((a, b) => b.wins - a.wins || b.totalPoints - a.totalPoints);
+  const lines: string[] = [];
 
-// Pick a random item from an array — used to add variety to templated lines
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+  const leader = sorted[0];
+  if (leader.wins > 0) {
+    lines.push(`${leader.teamName} leads the league at ${leader.wins}-${leader.losses}`);
+  }
+
+  const cellar = sorted[sorted.length - 1];
+  if (cellar.losses > 1 && cellar !== leader) {
+    lines.push(`${cellar.teamName} is struggling at ${cellar.wins}-${cellar.losses}`);
+  }
+
+  for (const r of records) {
+    const played = r.wins + r.losses;
+    if (played >= 3 && r.wins === played) {
+      lines.push(`${r.teamName} is undefeated on the season`);
+    } else if (played >= 3 && r.losses === played) {
+      lines.push(`${r.teamName} has yet to win a game this season`);
+    }
+  }
+
+  return lines.length > 0 ? lines.join("; ") : "Season is early — no major storylines yet.";
 }
 
 // ─── Main generator ─────────────────────────────────────────────────────────
 
-export function generateRecap(
+export async function generateRecap(
   weekNumber: number,
   matchups: MatchupData[],
-  allTeamRecords: TeamRecord[] // cumulative records BEFORE this week's results
-): RecapContent {
-  if (matchups.length === 0) {
-    return {
-      headlines: ["No matchups recorded yet."],
-      storyline: "Nothing to report this week.",
-      awards: {},
-      roast: [],
-      powerRankings: [],
-    };
-  }
+  allTeamRecords: TeamRecord[], // cumulative records BEFORE this week's results
+  leagueName: string
+): Promise<RecapContent> {
+  // ── Power Rankings (always deterministic) ──────────────────────────────
 
-  // ── Key matchup stats ────────────────────────────────────────────────────
-
-  // Blowout = biggest point differential
-  const blowout = [...matchups].sort((a, b) => scoreDiff(b) - scoreDiff(a))[0];
-
-  // Closest game = smallest point differential
-  const closest = [...matchups].sort((a, b) => scoreDiff(a) - scoreDiff(b))[0];
-
-  // All individual performances (both sides of every matchup)
-  const allPerfs = matchups.flatMap((m) => [
-    { team: m.teamA, score: m.scoreA },
-    { team: m.teamB, score: m.scoreB },
-  ]);
-
-  const highScore = allPerfs.reduce((best, p) =>
-    p.score > best.score ? p : best
-  );
-  const lowScore = allPerfs.reduce((worst, p) =>
-    p.score < worst.score ? p : worst
-  );
-
-  // ── Headlines ────────────────────────────────────────────────────────────
-
-  const headlines: string[] = [
-    // Blowout headline
-    `${winner(blowout).name} DESTROYS ${loser(blowout).name} by ${scoreDiff(blowout).toFixed(2)} points in Week ${weekNumber}'s biggest beatdown`,
-    // Closest game headline
-    `NAIL-BITER: ${winner(closest).name} escapes with a win over ${loser(closest).name} — margin of just ${scoreDiff(closest).toFixed(2)} points`,
-    // High score headline
-    `${highScore.team} drops a season-high ${highScore.score.toFixed(2)} points — somebody check if they're cheating`,
-  ];
-
-  // ── Storyline ────────────────────────────────────────────────────────────
-
-  const storylineOpeners = [
-    `Week ${weekNumber} did NOT disappoint.`,
-    `Another week, another batch of tears in the group chat.`,
-    `Week ${weekNumber} was chaos, drama, and exactly what we signed up for.`,
-  ];
-
-  const storylineBody = `${pick(storylineOpeners)} The big story was ${winner(blowout).name} putting up a dominant performance against ${loser(blowout).name}, winning ${winner(blowout).score.toFixed(2)}–${loser(blowout).score.toFixed(2)}. Meanwhile, ${winner(closest).name} barely survived ${loser(closest).name} in a thriller that came down to the wire — final score ${winner(closest).score.toFixed(2)}–${loser(closest).score.toFixed(2)}. On the high end, ${highScore.team} torched the field with ${highScore.score.toFixed(2)} points. On the low end, ${lowScore.team} managed just ${lowScore.score.toFixed(2)} — not great, not great at all.`;
-
-  // ── Awards ───────────────────────────────────────────────────────────────
-
-  const awards: Record<string, string> = {
-    "🔥 Offensive Juggernaut":
-      `${highScore.team} with ${highScore.score.toFixed(2)} points. Dominant. Unstoppable. Please take it easy.`,
-    "🧊 Ice in Their Veins":
-      `${winner(closest).name} wins the closest game of the week (${scoreDiff(closest).toFixed(2)} pts). Therapist on speed dial recommended.`,
-    "💣 Blowout Artist":
-      `${winner(blowout).name} wins by ${scoreDiff(blowout).toFixed(2)} points. That's not a football score, that's a statement.`,
-    "😬 Participation Award":
-      `${lowScore.team} with ${lowScore.score.toFixed(2)} points. We're rooting for you. Kind of.`,
-  };
-
-  // ── Roast section ────────────────────────────────────────────────────────
-
-  const roast: string[] = [
-    pick([
-      `${lowScore.team} scored ${lowScore.score.toFixed(2)} points. My grandma watching the game on a rotary TV could have done better.`,
-      `${lowScore.team}: ${lowScore.score.toFixed(2)} points. The spirit is willing, but the lineup is not.`,
-      `${lowScore.team} put up ${lowScore.score.toFixed(2)} this week. That's it. That's the roast.`,
-    ]),
-    pick([
-      `${loser(blowout).name} got handled ${winner(blowout).score.toFixed(2)}–${loser(blowout).score.toFixed(2)}. That's not a loss, that's a humbling.`,
-      `Someone tell ${loser(blowout).name} that starting injured players is not a personality trait.`,
-    ]),
-  ];
-
-  // Add a roast for anyone who lost by under 5 points — tough luck section
-  const heartbreakers = matchups.filter(
-    (m) => scoreDiff(m) < 5 && scoreDiff(m) > 0
-  );
-  if (heartbreakers.length > 0) {
-    const hb = heartbreakers[0];
-    roast.push(
-      `${loser(hb).name} lost by ${scoreDiff(hb).toFixed(2)} points. ${pick([
-        "Brutal. Absolutely brutal.",
-        "That's the kind of loss you think about on Sunday night.",
-        "Somewhere, a bench player is catching a stray.",
-      ])}`
-    );
-  }
-
-  // ── Power Rankings ───────────────────────────────────────────────────────
-
-  // Update records based on this week's results
   const updatedRecords = new Map<string, TeamRecord>();
 
-  // Seed from prior records
   for (const r of allTeamRecords) {
     updatedRecords.set(r.teamName, { ...r });
   }
 
-  // Apply this week's outcomes
   for (const m of matchups) {
-    const aRec = updatedRecords.get(m.teamA) ?? {
-      teamName: m.teamA,
-      wins: 0,
-      losses: 0,
-      totalPoints: 0,
-    };
-    const bRec = updatedRecords.get(m.teamB) ?? {
-      teamName: m.teamB,
-      wins: 0,
-      losses: 0,
-      totalPoints: 0,
-    };
+    const aRec = updatedRecords.get(m.teamA) ?? { teamName: m.teamA, wins: 0, losses: 0, totalPoints: 0 };
+    const bRec = updatedRecords.get(m.teamB) ?? { teamName: m.teamB, wins: 0, losses: 0, totalPoints: 0 };
 
     aRec.totalPoints += m.scoreA;
     bRec.totalPoints += m.scoreB;
@@ -204,7 +117,6 @@ export function generateRecap(
     updatedRecords.set(m.teamB, bRec);
   }
 
-  // Sort: most wins first, then total points as a tiebreaker
   const sorted = Array.from(updatedRecords.values()).sort((a, b) => {
     if (b.wins !== a.wins) return b.wins - a.wins;
     return b.totalPoints - a.totalPoints;
@@ -218,5 +130,136 @@ export function generateRecap(
     totalPoints: Math.round(r.totalPoints * 100) / 100,
   }));
 
-  return { headlines, storyline: storylineBody, awards, roast, powerRankings };
+  // ── Empty week fallback ────────────────────────────────────────────────
+
+  if (matchups.length === 0) {
+    return {
+      title: "Nothing to report",
+      headlines: [],
+      matchupRecaps: [],
+      callouts: {
+        biggestWin: "No matchups this week.",
+        worstLoss: "No matchups this week.",
+        teamInTrouble: "N/A",
+        teamToWatch: "N/A",
+      },
+      powerRankings,
+    };
+  }
+
+  // ── Build prompt context ───────────────────────────────────────────────
+
+  const teamList = [...new Set(matchups.flatMap((m) => [m.teamA, m.teamB]))].join(", ");
+
+  const matchupsText = matchups
+    .map((m) => {
+      const winnerName = m.scoreA > m.scoreB ? m.teamA : m.teamB;
+      return `${m.teamA} ${m.scoreA.toFixed(2)} vs ${m.teamB} ${m.scoreB.toFixed(2)} — ${winnerName} wins`;
+    })
+    .join("\n");
+
+  const recordsText =
+    allTeamRecords.length > 0
+      ? allTeamRecords
+          .sort((a, b) => b.wins - a.wins)
+          .map((r) => `${r.teamName}: ${r.wins}-${r.losses} (${r.totalPoints.toFixed(2)} pts)`)
+          .join("\n")
+      : "First week of the season — no prior records.";
+
+  const storylinesText = buildStorylines(allTeamRecords);
+
+  const prompt = `You are the commissioner of a long-running fantasy football league.
+
+You have been running this league for years. You know every manager's habits, failures, and tendencies. You write weekly recaps that are entertaining, slightly sarcastic, and feel like they were written for a group chat — not a news article.
+
+Your tone:
+- Conversational, natural, and slightly roasting
+- Specific > generic
+- Confident, not over-explaining
+- No corporate or ESPN-style language
+
+Avoid ALL of the following phrases and styles:
+- "In a thrilling matchup"
+- "In a nail-biting finish"
+- "Let's dive in"
+- "It's worth noting"
+- "Showcased"
+- Any em-dashes (—)
+- Overly dramatic sports announcer tone
+
+If you don't have something interesting to say, keep it short instead of filling space.
+
+---
+
+LEAGUE CONTEXT:
+League Name: ${leagueName}
+
+Teams this week:
+${teamList}
+
+---
+
+WEEK ${weekNumber} RESULTS:
+${matchupsText}
+
+Records BEFORE this week:
+${recordsText}
+
+---
+
+ONGOING STORYLINES:
+${storylinesText}
+
+---
+
+OUTPUT — Return ONLY valid JSON with exactly this structure (no markdown, no code fences, no extra keys):
+{
+  "title": "One short punchy title for the week",
+  "headlines": [
+    "Headline under 12 words",
+    "Headline under 12 words",
+    "Headline under 12 words"
+  ],
+  "matchupRecaps": [
+    "2-4 sentence recap of matchup 1",
+    "2-4 sentence recap of matchup 2"
+  ],
+  "callouts": {
+    "biggestWin": "1-2 sentences about the most dominant win",
+    "worstLoss": "1-2 sentences about the most embarrassing loss",
+    "teamInTrouble": "1-2 sentences about a team that should be worried",
+    "teamToWatch": "1-2 sentences about a team on the rise or worth noting"
+  }
+}
+
+IMPORTANT:
+- matchupRecaps must have exactly ${matchups.length} entries, one per matchup in the order given above
+- Do NOT sound like a generic sports article
+- Prioritize personality and specificity over completeness`;
+
+  // ── Call Claude API ────────────────────────────────────────────────────
+
+  const client = new Anthropic();
+
+  const message = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  const rawText = message.content[0].type === "text" ? message.content[0].text : "";
+  const parsed = JSON.parse(extractJSON(rawText));
+
+  return {
+    title: parsed.title ?? `Week ${weekNumber}`,
+    headlines: parsed.headlines ?? [],
+    matchupRecaps: parsed.matchupRecaps ?? [],
+    callouts: {
+      biggestWin: parsed.callouts?.biggestWin ?? "",
+      worstLoss: parsed.callouts?.worstLoss ?? "",
+      teamInTrouble: parsed.callouts?.teamInTrouble ?? "",
+      teamToWatch: parsed.callouts?.teamToWatch ?? "",
+    },
+    powerRankings,
+  };
 }

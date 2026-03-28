@@ -36,8 +36,8 @@ export default async function RecapPage({
 
   // Parse stored JSON fields back into their typed shapes
   const headlines: string[] = JSON.parse(week.recap.headlines);
-  const awards: Record<string, string> = JSON.parse(week.recap.awards);
-  const roast: string[] = JSON.parse(week.recap.roast);
+  const matchupRecaps: string[] = JSON.parse(week.recap.storyline);
+  const callouts: { biggestWin: string; worstLoss: string; teamInTrouble: string; teamToWatch: string } = JSON.parse(week.recap.awards);
   const powerRankings: PowerRankingEntry[] = JSON.parse(week.recap.powerRankings);
 
   return (
@@ -52,10 +52,10 @@ export default async function RecapPage({
       {/* Page header */}
       <div className="text-center space-y-1">
         <p className="text-sm font-semibold uppercase tracking-widest text-green-600">
-          {week.league.name} · {week.league.seasonYear}
+          {week.league.name} · {week.league.seasonYear} · Week {week.weekNumber}
         </p>
-        <h1 className="text-4xl font-extrabold text-gray-900">
-          Week {week.weekNumber} Recap
+        <h1 className="text-3xl font-extrabold text-gray-900">
+          {week.recap.title || `Week ${week.weekNumber} Recap`}
         </h1>
         <p className="text-gray-500 text-sm">
           {week.matchups.length} matchup{week.matchups.length !== 1 ? "s" : ""}
@@ -77,14 +77,6 @@ export default async function RecapPage({
             </li>
           ))}
         </ul>
-      </section>
-
-      {/* Storyline */}
-      <section className="space-y-3">
-        <h2 className="text-xl font-bold text-gray-800 border-b border-gray-200 pb-2">
-          📖 Storyline of the Week
-        </h2>
-        <p className="text-gray-700 leading-relaxed">{week.recap.storyline}</p>
       </section>
 
       {/* Matchup results */}
@@ -127,36 +119,44 @@ export default async function RecapPage({
         </div>
       </section>
 
-      {/* Awards */}
-      <section className="space-y-3">
-        <h2 className="text-xl font-bold text-gray-800 border-b border-gray-200 pb-2">
-          🏅 Weekly Awards
-        </h2>
-        <div className="space-y-3">
-          {Object.entries(awards).map(([title, description]) => (
-            <div
-              key={title}
-              className="bg-white border border-gray-200 rounded-xl px-5 py-4"
-            >
-              <p className="font-bold text-gray-900 text-sm">{title}</p>
-              <p className="text-gray-600 text-sm mt-1">{description}</p>
-            </div>
-          ))}
-        </div>
-      </section>
+      {/* Matchup Recaps */}
+      {matchupRecaps.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-800 border-b border-gray-200 pb-2">
+            📖 Matchup Recaps
+          </h2>
+          <div className="space-y-4">
+            {week.matchups.map((m, i) => (
+              <div key={m.id} className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                  {m.teamA.name} vs {m.teamB.name}
+                </p>
+                <p className="text-gray-700 text-sm leading-relaxed">
+                  {matchupRecaps[i] ?? ""}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
-      {/* Roast */}
+      {/* Weekly Callouts */}
       <section className="space-y-3">
         <h2 className="text-xl font-bold text-gray-800 border-b border-gray-200 pb-2">
-          🔥 The Roast Corner
+          🏅 Weekly Callouts
         </h2>
         <div className="space-y-3">
-          {roast.map((line, i) => (
-            <div
-              key={i}
-              className="bg-red-50 border border-red-200 rounded-xl px-5 py-4 text-sm text-gray-800 italic"
-            >
-              "{line}"
+          {(
+            [
+              { label: "Biggest Win", value: callouts.biggestWin },
+              { label: "Worst Loss", value: callouts.worstLoss },
+              { label: "Team in Trouble", value: callouts.teamInTrouble },
+              { label: "Team to Watch", value: callouts.teamToWatch },
+            ] as const
+          ).map(({ label, value }) => (
+            <div key={label} className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+              <p className="font-bold text-gray-900 text-sm">{label}</p>
+              <p className="text-gray-600 text-sm mt-1">{value}</p>
             </div>
           ))}
         </div>

@@ -127,17 +127,29 @@ export async function createWeekWithMatchups(
 
   const priorRecords = Array.from(recordMap.values());
 
-  // Generate the recap content
-  const recap = generateRecap(weekNumber, matchupData, priorRecords);
+  // Fetch league name for the recap prompt
+  const league = await prisma.league.findUnique({ where: { id: leagueId }, select: { name: true } });
 
-  // Save the recap to the database as JSON strings
+  // Generate the recap content via Claude API
+  let recap;
+  try {
+    recap = await generateRecap(weekNumber, matchupData, priorRecords, league?.name ?? "Fantasy League");
+  } catch (err) {
+    // Delete the week we just created so the commissioner can try again
+    await prisma.week.delete({ where: { id: week.id } });
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Recap generation failed: ${message}` };
+  }
+
+  // Save the recap to the database
   await prisma.recap.create({
     data: {
       weekId: week.id,
+      title: recap.title,
       headlines: JSON.stringify(recap.headlines),
-      storyline: recap.storyline,
-      awards: JSON.stringify(recap.awards),
-      roast: JSON.stringify(recap.roast),
+      storyline: JSON.stringify(recap.matchupRecaps),
+      awards: JSON.stringify(recap.callouts),
+      roast: "[]",
       powerRankings: JSON.stringify(recap.powerRankings),
     },
   });
@@ -181,7 +193,25 @@ export async function updateWeekMatchups(
     return { error: "No matchups found to update." };
   }
 
-  // Update all matchup scores
+  // Parse any new matchups being added
+  const newMatchups: Array<{ teamAId: number; teamBId: number; scoreA: number; scoreB: number }> = [];
+  let j = 0;
+  while (formData.get(`new_${j}_teamA`) !== null) {
+    const teamAId = parseInt(formData.get(`new_${j}_teamA`) as string, 10);
+    const teamBId = parseInt(formData.get(`new_${j}_teamB`) as string, 10);
+    const scoreA = parseFloat(formData.get(`new_${j}_scoreA`) as string);
+    const scoreB = parseFloat(formData.get(`new_${j}_scoreB`) as string);
+
+    if (!teamAId || !teamBId) { j++; continue; } // skip empty rows
+    if (teamAId === teamBId) return { error: `New matchup ${j + 1}: a team cannot play itself.` };
+    if (isNaN(scoreA) || isNaN(scoreB) || scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
+      return { error: `New matchup ${j + 1} has an invalid score.` };
+    }
+    newMatchups.push({ teamAId, teamBId, scoreA, scoreB });
+    j++;
+  }
+
+  // Update existing matchup scores
   await Promise.all(
     updates.map((u) =>
       prisma.matchup.update({
@@ -190,6 +220,13 @@ export async function updateWeekMatchups(
       })
     )
   );
+
+  // Create new matchups
+  if (newMatchups.length > 0) {
+    await prisma.matchup.createMany({
+      data: newMatchups.map((m) => ({ ...m, weekId })),
+    });
+  }
 
   // Delete old recap so we regenerate fresh
   await prisma.recap.deleteMany({ where: { weekId } });
@@ -229,15 +266,24 @@ export async function updateWeekMatchups(
     else { bRec.wins++; aRec.losses++; }
   }
 
-  const recap = generateRecap(week.weekNumber, matchupData, Array.from(recordMap.values()));
+  const league = await prisma.league.findUnique({ where: { id: leagueId }, select: { name: true } });
+
+  let recap;
+  try {
+    recap = await generateRecap(week.weekNumber, matchupData, Array.from(recordMap.values()), league?.name ?? "Fantasy League");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Recap generation failed: ${message}` };
+  }
 
   await prisma.recap.create({
     data: {
       weekId,
+      title: recap.title,
       headlines: JSON.stringify(recap.headlines),
-      storyline: recap.storyline,
-      awards: JSON.stringify(recap.awards),
-      roast: JSON.stringify(recap.roast),
+      storyline: JSON.stringify(recap.matchupRecaps),
+      awards: JSON.stringify(recap.callouts),
+      roast: "[]",
       powerRankings: JSON.stringify(recap.powerRankings),
     },
   });
