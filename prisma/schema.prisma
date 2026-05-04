@@ -45,6 +45,8 @@ model Week {
   league   League    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
   matchups Matchup[]
   recap    Recap?
+
+  @@unique([leagueId, weekNumber])
 }
 
 // A head-to-head matchup between two teams in a given week

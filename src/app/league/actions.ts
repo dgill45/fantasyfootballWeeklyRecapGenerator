@@ -8,22 +8,28 @@ export async function createLeague(
   _prevState: { error: string } | null,
   formData: FormData
 ): Promise<{ error: string } | null> {
-  const name = formData.get("name") as string;
+  const name = (formData.get("name") as string)?.trim();
   const seasonYear = parseInt(formData.get("seasonYear") as string, 10);
 
-  // Collect all teamName_N entries from the form.
-  // We use Array.from() to avoid TS iterator compatibility issues.
-  const teamNames: string[] = Array.from(formData.entries())
-    .filter(([key, value]) => key.startsWith("teamName_") && typeof value === "string" && (value as string).trim())
-    .map(([, value]) => (value as string).trim());
+  if (!name || Number.isNaN(seasonYear)) {
+    return { error: "Please provide a league name and a valid season year." };
+  }
 
-  if (!name || !seasonYear || teamNames.length < 2) {
-    return { error: "Please provide a league name, year, and at least 2 teams." };
+  // Collect, trim, and deduplicate team names — skip blanks
+  const rawTeamNames: string[] = Array.from(formData.entries())
+    .filter(([key]) => key.startsWith("teamName_"))
+    .map(([, value]) => (value as string).trim())
+    .filter((n) => n.length > 0);
+
+  const teamNames = [...new Set(rawTeamNames)];
+
+  if (teamNames.length < 2) {
+    return { error: "Please provide at least 2 team names." };
   }
 
   const league = await prisma.league.create({
     data: {
-      name: name.trim(),
+      name,
       seasonYear,
       teams: {
         create: teamNames.map((teamName) => ({ name: teamName })),
@@ -44,21 +50,37 @@ export async function updateLeague(
   const name = (formData.get("name") as string)?.trim();
   const seasonYear = parseInt(formData.get("seasonYear") as string, 10);
 
-  if (!name || !seasonYear) {
-    return { error: "League name and season year are required." };
+  if (!name || Number.isNaN(seasonYear)) {
+    return { error: "League name and a valid season year are required." };
   }
 
-  const newTeamNames: string[] = Array.from(formData.entries())
-    .filter(([key, value]) => key.startsWith("newTeam_") && typeof value === "string" && (value as string).trim())
-    .map(([, value]) => (value as string).trim());
+  // Collect, trim, and deduplicate new team names — skip blanks
+  const rawNewTeamNames: string[] = Array.from(formData.entries())
+    .filter(([key]) => key.startsWith("newTeam_"))
+    .map(([, value]) => (value as string).trim())
+    .filter((n) => n.length > 0);
+
+  const newTeamNames = [...new Set(rawNewTeamNames)];
+
+  // Filter out teams that already exist in this league to avoid crashing
+  // on the unique constraint. Silently skip duplicates — the DB already has them.
+  let teamsToCreate: string[] = [];
+  if (newTeamNames.length > 0) {
+    const existingTeams = await prisma.team.findMany({
+      where: { leagueId },
+      select: { name: true },
+    });
+    const existingNames = new Set(existingTeams.map((t) => t.name));
+    teamsToCreate = newTeamNames.filter((n) => !existingNames.has(n));
+  }
 
   await prisma.league.update({
     where: { id: leagueId },
     data: {
       name,
       seasonYear,
-      ...(newTeamNames.length > 0 && {
-        teams: { create: newTeamNames.map((n) => ({ name: n })) },
+      ...(teamsToCreate.length > 0 && {
+        teams: { create: teamsToCreate.map((n) => ({ name: n })) },
       }),
     },
   });

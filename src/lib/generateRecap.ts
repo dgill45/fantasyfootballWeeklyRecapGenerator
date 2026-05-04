@@ -2,8 +2,12 @@
  * Recap generation — powered by Claude API.
  *
  * The AI generates the narrative content (title, headlines, matchup recaps,
- * weekly callouts). Power rankings are still computed deterministically from
- * the actual win/loss records so they're always accurate.
+ * weekly callouts). Power rankings are always computed deterministically from
+ * win/loss records so they're always accurate.
+ *
+ * If the Claude API fails, returns malformed JSON, or returns an unexpected
+ * structure, the function falls back to a simple deterministic recap so the
+ * week is always saved successfully.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -82,6 +86,69 @@ function buildStorylines(records: TeamRecord[]): string {
   return lines.length > 0 ? lines.join("; ") : "Season is early — no major storylines yet.";
 }
 
+/**
+ * Simple deterministic fallback recap used when the Claude API is unavailable
+ * or returns an unusable response. Rule-based but readable.
+ */
+function generateFallbackRecap(
+  weekNumber: number,
+  matchups: MatchupData[],
+  powerRankings: PowerRankingEntry[]
+): RecapContent {
+  // Biggest margin win
+  const byMargin = [...matchups].sort(
+    (a, b) => Math.abs(b.scoreA - b.scoreB) - Math.abs(a.scoreA - a.scoreB)
+  );
+  const biggest = byMargin[0];
+  const biggestWinner = biggest.scoreA > biggest.scoreB ? biggest.teamA : biggest.teamB;
+  const biggestLoser = biggest.scoreA > biggest.scoreB ? biggest.teamB : biggest.teamA;
+  const biggestMargin = Math.abs(biggest.scoreA - biggest.scoreB).toFixed(2);
+
+  // Worst loss — team with the lowest losing score
+  const worstLoserMatchup = [...matchups].sort(
+    (a, b) => Math.min(a.scoreA, a.scoreB) - Math.min(b.scoreA, b.scoreB)
+  )[0];
+  const worstLoser =
+    worstLoserMatchup.scoreA < worstLoserMatchup.scoreB
+      ? worstLoserMatchup.teamA
+      : worstLoserMatchup.teamB;
+  const worstScore = Math.min(worstLoserMatchup.scoreA, worstLoserMatchup.scoreB).toFixed(2);
+
+  const leader = powerRankings[0];
+  const lastPlace = powerRankings[powerRankings.length - 1];
+
+  const matchupRecaps = matchups.map((m) => {
+    const winner = m.scoreA > m.scoreB ? m.teamA : m.teamB;
+    const loser = m.scoreA > m.scoreB ? m.teamB : m.teamA;
+    const wScore = (m.scoreA > m.scoreB ? m.scoreA : m.scoreB).toFixed(2);
+    const lScore = (m.scoreA > m.scoreB ? m.scoreB : m.scoreA).toFixed(2);
+    return `${winner} defeated ${loser} ${wScore}-${lScore}.`;
+  });
+
+  return {
+    title: `Week ${weekNumber} Results`,
+    headlines: [
+      `${biggestWinner} wins big, ${biggestLoser} drops by ${biggestMargin} points`,
+      `${leader.teamName} holds the top spot in the standings`,
+      `${lastPlace.teamName} falls to ${lastPlace.wins}-${lastPlace.losses}`,
+    ],
+    matchupRecaps,
+    callouts: {
+      biggestWin: `${biggestWinner} beat ${biggestLoser} by ${biggestMargin} points.`,
+      worstLoss: `${worstLoser} put up just ${worstScore} points in a loss.`,
+      teamInTrouble:
+        lastPlace.losses > 1
+          ? `${lastPlace.teamName} is ${lastPlace.wins}-${lastPlace.losses} and running out of time.`
+          : `${lastPlace.teamName} hasn't found their footing yet.`,
+      teamToWatch:
+        leader.wins > 0
+          ? `${leader.teamName} is ${leader.wins}-${leader.losses} and looking like the team to beat.`
+          : `${leader.teamName} is off to a strong start.`,
+    },
+    powerRankings,
+  };
+}
+
 // ─── Main generator ─────────────────────────────────────────────────────────
 
 export async function generateRecap(
@@ -108,10 +175,11 @@ export async function generateRecap(
     if (m.scoreA > m.scoreB) {
       aRec.wins += 1;
       bRec.losses += 1;
-    } else {
+    } else if (m.scoreB > m.scoreA) {
       bRec.wins += 1;
       aRec.losses += 1;
     }
+    // Tied scores: no win/loss assigned (ties are rejected at input)
 
     updatedRecords.set(m.teamA, aRec);
     updatedRecords.set(m.teamB, bRec);
@@ -160,7 +228,7 @@ export async function generateRecap(
 
   const recordsText =
     allTeamRecords.length > 0
-      ? allTeamRecords
+      ? [...allTeamRecords]
           .sort((a, b) => b.wins - a.wins)
           .map((r) => `${r.teamName}: ${r.wins}-${r.losses} (${r.totalPoints.toFixed(2)} pts)`)
           .join("\n")
@@ -237,29 +305,47 @@ IMPORTANT:
 - Do NOT sound like a generic sports article
 - Prioritize personality and specificity over completeness`;
 
-  // ── Call Claude API ────────────────────────────────────────────────────
+  // ── Call Claude API — fall back to deterministic if anything goes wrong ──
 
-  const client = new Anthropic();
+  try {
+    const client = new Anthropic();
 
-  const message = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 1024,
-    messages: [{ role: "user", content: prompt }],
-  });
+    const message = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: prompt }],
+    });
 
-  const rawText = message.content[0].type === "text" ? message.content[0].text : "";
-  const parsed = JSON.parse(extractJSON(rawText));
+    const rawText = message.content[0].type === "text" ? message.content[0].text : "";
+    const parsed = JSON.parse(extractJSON(rawText));
 
-  return {
-    title: parsed.title ?? `Week ${weekNumber}`,
-    headlines: parsed.headlines ?? [],
-    matchupRecaps: parsed.matchupRecaps ?? [],
-    callouts: {
-      biggestWin: parsed.callouts?.biggestWin ?? "",
-      worstLoss: parsed.callouts?.worstLoss ?? "",
-      teamInTrouble: parsed.callouts?.teamInTrouble ?? "",
-      teamToWatch: parsed.callouts?.teamToWatch ?? "",
-    },
-    powerRankings,
-  };
+    // Validate the response has the required shape before trusting it
+    if (
+      typeof parsed.title !== "string" ||
+      !Array.isArray(parsed.headlines) ||
+      !Array.isArray(parsed.matchupRecaps) ||
+      typeof parsed.callouts !== "object" ||
+      parsed.callouts === null
+    ) {
+      throw new Error("Claude returned an unexpected JSON structure.");
+    }
+
+    return {
+      title: parsed.title,
+      headlines: parsed.headlines,
+      matchupRecaps: parsed.matchupRecaps,
+      callouts: {
+        biggestWin: parsed.callouts.biggestWin ?? "",
+        worstLoss: parsed.callouts.worstLoss ?? "",
+        teamInTrouble: parsed.callouts.teamInTrouble ?? "",
+        teamToWatch: parsed.callouts.teamToWatch ?? "",
+      },
+      powerRankings,
+    };
+  } catch {
+    // Claude API failed, timed out, returned malformed JSON, or returned an
+    // unexpected structure. Fall back to a deterministic recap so the week
+    // is always saved successfully.
+    return generateFallbackRecap(weekNumber, matchups, powerRankings);
+  }
 }

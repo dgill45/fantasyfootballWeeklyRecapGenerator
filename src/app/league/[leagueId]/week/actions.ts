@@ -15,7 +15,7 @@ export async function createWeekWithMatchups(
 ): Promise<{ error: string } | null> {
   const weekNumber = parseInt(formData.get("weekNumber") as string, 10);
 
-  if (!weekNumber || weekNumber < 1) {
+  if (Number.isNaN(weekNumber) || weekNumber < 1) {
     return { error: "Invalid week number." };
   }
 
@@ -26,7 +26,8 @@ export async function createWeekWithMatchups(
     return { error: `Week ${weekNumber} already exists for this league.` };
   }
 
-  // Parse matchups from form — each matchup is identified by an index
+  // Parse matchups from form — each matchup is identified by an index.
+  // The form sends fields like: matchup_0_teamA, matchup_0_scoreA, etc.
   const matchupInputs: Array<{
     teamAId: number;
     teamBId: number;
@@ -34,7 +35,6 @@ export async function createWeekWithMatchups(
     scoreB: number;
   }> = [];
 
-  // The form sends fields like: matchup_0_teamA, matchup_0_scoreA, etc.
   let i = 0;
   while (formData.get(`matchup_${i}_teamA`) !== null) {
     const teamAId = parseInt(formData.get(`matchup_${i}_teamA`) as string, 10);
@@ -42,9 +42,15 @@ export async function createWeekWithMatchups(
     const scoreA = parseFloat(formData.get(`matchup_${i}_scoreA`) as string);
     const scoreB = parseFloat(formData.get(`matchup_${i}_scoreB`) as string);
 
-    if (teamAId && teamBId && !isNaN(scoreA) && !isNaN(scoreB)) {
+    if (teamAId && teamBId && !Number.isNaN(scoreA) && !Number.isNaN(scoreB)) {
+      if (teamAId === teamBId) {
+        return { error: `Matchup ${i + 1}: a team cannot play itself.` };
+      }
       if (scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
         return { error: `Matchup ${i + 1} has an invalid score. Scores must be between 0 and 500.` };
+      }
+      if (scoreA === scoreB) {
+        return { error: `Matchup ${i + 1} ended in a tie. Tied scores are not supported.` };
       }
       matchupInputs.push({ teamAId, teamBId, scoreA, scoreB });
     }
@@ -53,6 +59,23 @@ export async function createWeekWithMatchups(
 
   if (matchupInputs.length === 0) {
     return { error: "Please enter at least one matchup." };
+  }
+
+  // Validate no team appears more than once, and no pair appears more than once
+  const seenTeamIds = new Set<number>();
+  const seenPairs = new Set<string>();
+  for (let idx = 0; idx < matchupInputs.length; idx++) {
+    const { teamAId, teamBId } = matchupInputs[idx];
+    if (seenTeamIds.has(teamAId) || seenTeamIds.has(teamBId)) {
+      return { error: `Matchup ${idx + 1}: a team cannot appear in more than one matchup per week.` };
+    }
+    const pairKey = [teamAId, teamBId].sort().join("-");
+    if (seenPairs.has(pairKey)) {
+      return { error: `Matchup ${idx + 1}: this matchup pair appears more than once.` };
+    }
+    seenTeamIds.add(teamAId);
+    seenTeamIds.add(teamBId);
+    seenPairs.add(pairKey);
   }
 
   // Create the week and all matchups in one transaction
@@ -87,7 +110,7 @@ export async function createWeekWithMatchups(
     where: {
       week: {
         leagueId,
-        id: { not: week.id }, // exclude the week we just created
+        id: { not: week.id },
       },
     },
     include: {
@@ -96,41 +119,12 @@ export async function createWeekWithMatchups(
     },
   });
 
-  // Tally wins, losses, and total points across all past matchups
-  const recordMap = new Map<string, TeamRecord>();
-
-  for (const m of previousMatchups) {
-    const aKey = m.teamA.name;
-    const bKey = m.teamB.name;
-
-    if (!recordMap.has(aKey)) {
-      recordMap.set(aKey, { teamName: aKey, wins: 0, losses: 0, totalPoints: 0 });
-    }
-    if (!recordMap.has(bKey)) {
-      recordMap.set(bKey, { teamName: bKey, wins: 0, losses: 0, totalPoints: 0 });
-    }
-
-    const aRec = recordMap.get(aKey)!;
-    const bRec = recordMap.get(bKey)!;
-
-    aRec.totalPoints += m.scoreA;
-    bRec.totalPoints += m.scoreB;
-
-    if (m.scoreA > m.scoreB) {
-      aRec.wins += 1;
-      bRec.losses += 1;
-    } else {
-      bRec.wins += 1;
-      aRec.losses += 1;
-    }
-  }
-
-  const priorRecords = Array.from(recordMap.values());
+  const priorRecords = buildRecordMap(previousMatchups);
 
   // Fetch league name for the recap prompt
   const league = await prisma.league.findUnique({ where: { id: leagueId }, select: { name: true } });
 
-  // Generate the recap content via Claude API
+  // Generate the recap content — falls back to deterministic if Claude fails
   let recap;
   try {
     recap = await generateRecap(weekNumber, matchupData, priorRecords, league?.name ?? "Fantasy League");
@@ -141,7 +135,6 @@ export async function createWeekWithMatchups(
     return { error: `Recap generation failed: ${message}` };
   }
 
-  // Save the recap to the database
   await prisma.recap.create({
     data: {
       weekId: week.id,
@@ -174,6 +167,7 @@ export async function updateWeekMatchups(
   _prevState: { error: string } | null,
   formData: FormData
 ): Promise<{ error: string } | null> {
+  // Parse score updates for existing matchups
   const updates: Array<{ id: number; scoreA: number; scoreB: number }> = [];
 
   let i = 0;
@@ -182,8 +176,11 @@ export async function updateWeekMatchups(
     const scoreA = parseFloat(formData.get(`matchup_${i}_scoreA`) as string);
     const scoreB = parseFloat(formData.get(`matchup_${i}_scoreB`) as string);
 
-    if (isNaN(scoreA) || isNaN(scoreB) || scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
+    if (Number.isNaN(scoreA) || Number.isNaN(scoreB) || scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
       return { error: `Matchup ${i + 1} has an invalid score. Scores must be between 0 and 500.` };
+    }
+    if (scoreA === scoreB) {
+      return { error: `Matchup ${i + 1} has a tied score. Ties are not supported.` };
     }
     updates.push({ id, scoreA, scoreB });
     i++;
@@ -203,12 +200,36 @@ export async function updateWeekMatchups(
     const scoreB = parseFloat(formData.get(`new_${j}_scoreB`) as string);
 
     if (!teamAId || !teamBId) { j++; continue; } // skip empty rows
-    if (teamAId === teamBId) return { error: `New matchup ${j + 1}: a team cannot play itself.` };
-    if (isNaN(scoreA) || isNaN(scoreB) || scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
-      return { error: `New matchup ${j + 1} has an invalid score.` };
+    if (teamAId === teamBId) {
+      return { error: `New matchup ${j + 1}: a team cannot play itself.` };
+    }
+    if (Number.isNaN(scoreA) || Number.isNaN(scoreB) || scoreA < 0 || scoreA > 500 || scoreB < 0 || scoreB > 500) {
+      return { error: `New matchup ${j + 1} has an invalid score. Scores must be between 0 and 500.` };
+    }
+    if (scoreA === scoreB) {
+      return { error: `New matchup ${j + 1} has a tied score. Ties are not supported.` };
     }
     newMatchups.push({ teamAId, teamBId, scoreA, scoreB });
     j++;
+  }
+
+  // Validate no team or pair appears more than once across all new matchups
+  if (newMatchups.length > 0) {
+    const seenTeamIds = new Set<number>();
+    const seenPairs = new Set<string>();
+    for (let idx = 0; idx < newMatchups.length; idx++) {
+      const { teamAId, teamBId } = newMatchups[idx];
+      if (seenTeamIds.has(teamAId) || seenTeamIds.has(teamBId)) {
+        return { error: `New matchup ${idx + 1}: a team cannot appear in more than one matchup per week.` };
+      }
+      const pairKey = [teamAId, teamBId].sort().join("-");
+      if (seenPairs.has(pairKey)) {
+        return { error: `New matchup ${idx + 1}: this matchup pair appears more than once.` };
+      }
+      seenTeamIds.add(teamAId);
+      seenTeamIds.add(teamBId);
+      seenPairs.add(pairKey);
+    }
   }
 
   // Update existing matchup scores
@@ -252,25 +273,16 @@ export async function updateWeekMatchups(
     include: { teamA: true, teamB: true },
   });
 
-  const recordMap = new Map<string, TeamRecord>();
-  for (const m of previousMatchups) {
-    const aKey = m.teamA.name;
-    const bKey = m.teamB.name;
-    if (!recordMap.has(aKey)) recordMap.set(aKey, { teamName: aKey, wins: 0, losses: 0, totalPoints: 0 });
-    if (!recordMap.has(bKey)) recordMap.set(bKey, { teamName: bKey, wins: 0, losses: 0, totalPoints: 0 });
-    const aRec = recordMap.get(aKey)!;
-    const bRec = recordMap.get(bKey)!;
-    aRec.totalPoints += m.scoreA;
-    bRec.totalPoints += m.scoreB;
-    if (m.scoreA > m.scoreB) { aRec.wins++; bRec.losses++; }
-    else { bRec.wins++; aRec.losses++; }
-  }
-
   const league = await prisma.league.findUnique({ where: { id: leagueId }, select: { name: true } });
 
   let recap;
   try {
-    recap = await generateRecap(week.weekNumber, matchupData, Array.from(recordMap.values()), league?.name ?? "Fantasy League");
+    recap = await generateRecap(
+      week.weekNumber,
+      matchupData,
+      buildRecordMap(previousMatchups),
+      league?.name ?? "Fantasy League"
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return { error: `Recap generation failed: ${message}` };
@@ -289,4 +301,46 @@ export async function updateWeekMatchups(
   });
 
   redirect(`/league/${leagueId}/week/${weekId}`);
+}
+
+// ─── Shared helpers ──────────────────────────────────────────────────────────
+
+type MatchupWithTeams = {
+  teamA: { name: string };
+  teamB: { name: string };
+  scoreA: number;
+  scoreB: number;
+};
+
+/**
+ * Tallies wins, losses, and total points from a list of past matchups.
+ * Ties are not awarded — if scores are equal, neither team gets a win or loss.
+ */
+function buildRecordMap(matchups: MatchupWithTeams[]): TeamRecord[] {
+  const recordMap = new Map<string, TeamRecord>();
+
+  for (const m of matchups) {
+    const aKey = m.teamA.name;
+    const bKey = m.teamB.name;
+
+    if (!recordMap.has(aKey)) recordMap.set(aKey, { teamName: aKey, wins: 0, losses: 0, totalPoints: 0 });
+    if (!recordMap.has(bKey)) recordMap.set(bKey, { teamName: bKey, wins: 0, losses: 0, totalPoints: 0 });
+
+    const aRec = recordMap.get(aKey)!;
+    const bRec = recordMap.get(bKey)!;
+
+    aRec.totalPoints += m.scoreA;
+    bRec.totalPoints += m.scoreB;
+
+    if (m.scoreA > m.scoreB) {
+      aRec.wins += 1;
+      bRec.losses += 1;
+    } else if (m.scoreB > m.scoreA) {
+      bRec.wins += 1;
+      aRec.losses += 1;
+    }
+    // Tied scores: no win/loss assigned (ties are rejected at input)
+  }
+
+  return Array.from(recordMap.values());
 }
